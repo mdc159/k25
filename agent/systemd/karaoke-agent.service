@@ -1,0 +1,68 @@
+[Unit]
+Description=Karaoke Agent - Home Linux Worker for YouTube Downloads
+Documentation=https://github.com/mdc159/Hostinger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hammer
+Group=hammer
+
+# Working directory
+WorkingDirectory=/opt/karaoke-agent
+
+# Environment file with secrets
+EnvironmentFile=/opt/karaoke-agent/.env
+
+# Command using uv for dependency management
+ExecStart=/home/hammer/.local/bin/uv run karaoke-agent --loop
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Graceful shutdown
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Restart policy
+Restart=on-failure
+RestartSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Watchdog - systemd will restart if no heartbeat
+WatchdogSec=300
+NotifyAccess=main
+
+# Resource limits
+MemoryMax=2G
+MemoryHigh=1.5G
+CPUQuota=80%
+TasksMax=50
+
+# IO limits (optional, comment out if not needed)
+# IOWeight=100
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+# Allow write access to download directory and logs
+ReadWritePaths=/var/lib/karaoke-agent
+ReadWritePaths=/opt/karaoke-agent/.venv
+
+# Network access required
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=karaoke-agent
+
+[Install]
+WantedBy=multi-user.target

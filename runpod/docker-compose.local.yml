@@ -1,0 +1,32 @@
+version: "3.8"
+
+services:
+  demucs-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: demucs-worker:local
+    container_name: demucs-local
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      # Mount test directory for input/output
+      - ./test:/work
+      # Mount handler for live editing
+      - ./handler.py:/app/handler.py:ro
+      - ./local_test.py:/app/local_test.py:ro
+    environment:
+      # AWS S3 credentials for karaoke-pimpshizzle bucket
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+    working_dir: /app
+    # Override CMD for interactive testing
+    entrypoint: ["/bin/bash"]
+    stdin_open: true
+    tty: true

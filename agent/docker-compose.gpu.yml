@@ -1,0 +1,14 @@
+# GPU Override for Karaoke Agent
+#
+# Use WITH the base docker-compose.yml on machines with NVIDIA GPU:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+services:
+  karaoke-agent:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

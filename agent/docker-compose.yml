@@ -1,0 +1,55 @@
+# Karaoke Agent Docker Compose
+#
+# Universal image - works with or without GPU.
+# GPU mode: Set STEM_SPLITTING_ENABLED=true in .env (requires NVIDIA GPU)
+# CPU mode: Set STEM_SPLITTING_ENABLED=false in .env (uses RunPod)
+#
+# Usage:
+#   docker compose up -d          # Start agent
+#   docker compose logs -f        # View logs
+#   docker compose down           # Stop agent
+#
+# For GPU support, also use the GPU override:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+services:
+  karaoke-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: karaoke-agent:latest
+    container_name: karaoke-agent
+
+    # Environment from .env file
+    env_file:
+      - .env
+
+    # Environment defaults (can be overridden in .env)
+    environment:
+      - DOWNLOAD_DIR=/var/lib/karaoke-agent/spool
+
+    # Persistent storage for downloads
+    volumes:
+      - karaoke-spool:/var/lib/karaoke-agent/spool
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Logging
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+    # Health check - verify agent module loads
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import karaoke_agent; print('OK')"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  karaoke-spool:
+    name: karaoke-agent-spool
