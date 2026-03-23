@@ -11,7 +11,7 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
+from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -227,7 +227,7 @@ def create_multi_track_mp4(
 def run_pipeline(
     job_dir: Path,
     source_path: Path,
-    on_status: callable,
+    on_status: Callable[[str, str], None],
     title: str | None = None,
 ) -> None:
     """

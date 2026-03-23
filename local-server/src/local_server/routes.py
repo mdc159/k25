@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import shutil
 import uuid
 from pathlib import Path
 
@@ -22,6 +24,9 @@ jobs: dict[str, JobStatus] = {}
 
 # Simple lock: one pipeline at a time
 _pipeline_lock = asyncio.Lock()
+
+# Track background tasks for graceful shutdown
+_tasks: set[asyncio.Task] = set()
 
 # Data directory (set by main.py on startup)
 DATA_DIR: Path = Path()
@@ -45,7 +50,6 @@ def scan_library() -> list[TrackInfo]:
         if not manifest.exists():
             continue
 
-        import json
         try:
             data = json.loads(manifest.read_text())
         except Exception:
@@ -69,14 +73,21 @@ async def upload_file(file: UploadFile) -> dict:
     if not file.filename:
         raise HTTPException(400, "No file provided")
 
+    if file.content_type and not file.content_type.startswith("video/"):
+        raise HTTPException(400, "Only video files are accepted")
+
     job_id = uuid.uuid4().hex[:12]
     job_dir = DATA_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save uploaded file
+    # Save uploaded file — stream to disk to avoid buffering large files in RAM
     source_path = job_dir / "source.mp4"
-    content = await file.read()
-    source_path.write_bytes(content)
+
+    def _save_upload(src, dst: Path) -> None:
+        with open(dst, "wb") as f:
+            shutil.copyfileobj(src, f)
+
+    await asyncio.to_thread(_save_upload, file.file, source_path)
 
     # Derive title from original filename
     original_title = Path(file.filename).stem
@@ -85,7 +96,9 @@ async def upload_file(file: UploadFile) -> dict:
     jobs[job_id] = JobStatus(jobId=job_id, status=JobStatusEnum.pending)
 
     # Start pipeline in background
-    asyncio.create_task(_run_pipeline(job_id, job_dir, source_path, original_title))
+    task = asyncio.create_task(_run_pipeline(job_id, job_dir, source_path, original_title))
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
 
     return {"jobId": job_id}
 
@@ -147,7 +160,7 @@ async def serve_track_file(job_id: str, path: str) -> FileResponse:
 
     # Security: ensure path stays within job directory
     job_dir = (DATA_DIR / job_id).resolve()
-    if not str(file_path).startswith(str(job_dir)):
+    if not file_path.is_relative_to(job_dir):
         raise HTTPException(403, "Access denied")
 
     if not file_path.exists():
