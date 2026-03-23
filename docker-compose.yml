@@ -1,0 +1,18 @@
+services:
+  local-server:
+    build:
+      context: local-server
+      dockerfile: Dockerfile
+    container_name: karaoke-local-server
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./data:/app/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
