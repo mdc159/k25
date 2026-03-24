@@ -6,14 +6,15 @@ import asyncio
 import json
 import logging
 import shutil
+import time
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from .models import JobStatus, JobStatusEnum, LibraryResponse, TrackInfo
-from .processing import run_pipeline
+from .models import JobStatus, JobStatusEnum, LibraryResponse, StageTiming, TrackInfo
+from .processing import get_duration, run_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,11 @@ _tasks: set[asyncio.Task] = set()
 
 # Data directory (set by main.py on startup)
 DATA_DIR: Path = Path()
+
+# --- Limits ---
+MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
+MAX_DURATION_SECONDS = 1800  # 30 minutes
+MAX_JOBS = 20
 
 
 def set_data_dir(path: Path) -> None:
@@ -67,6 +73,21 @@ def scan_library() -> list[TrackInfo]:
     return tracks
 
 
+def _enforce_retention() -> None:
+    """Delete oldest job directories when count exceeds MAX_JOBS."""
+    if not DATA_DIR.exists():
+        return
+    job_dirs = sorted(
+        (d for d in DATA_DIR.iterdir() if d.is_dir()),
+        key=lambda d: d.stat().st_mtime,
+    )
+    while len(job_dirs) > MAX_JOBS:
+        oldest = job_dirs.pop(0)
+        logger.info("Retention: removing old job %s", oldest.name)
+        shutil.rmtree(oldest, ignore_errors=True)
+        jobs.pop(oldest.name, None)
+
+
 @router.post("/upload")
 async def upload_file(file: UploadFile) -> dict:
     """Accept an MP4 upload and start the processing pipeline."""
@@ -76,18 +97,45 @@ async def upload_file(file: UploadFile) -> dict:
     if file.content_type and not file.content_type.startswith("video/"):
         raise HTTPException(400, "Only video files are accepted")
 
+    # Enforce retention before creating new job
+    _enforce_retention()
+
     job_id = uuid.uuid4().hex[:12]
     job_dir = DATA_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save uploaded file — stream to disk to avoid buffering large files in RAM
+    # Save uploaded file — stream to disk with size limit
     source_path = job_dir / "source.mp4"
 
-    def _save_upload(src, dst: Path) -> None:
+    def _save_upload(src, dst: Path) -> int:
+        bytes_written = 0
         with open(dst, "wb") as f:
-            shutil.copyfileobj(src, f)
+            while chunk := src.read(1024 * 1024):  # 1 MB chunks
+                bytes_written += len(chunk)
+                if bytes_written > MAX_UPLOAD_BYTES:
+                    raise ValueError("File too large")
+                f.write(chunk)
+        return bytes_written
 
-    await asyncio.to_thread(_save_upload, file.file, source_path)
+    try:
+        await asyncio.to_thread(_save_upload, file.file, source_path)
+    except ValueError:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise HTTPException(413, f"File exceeds {MAX_UPLOAD_BYTES // (1024**3)} GB limit")
+
+    # Check duration
+    try:
+        duration = await asyncio.to_thread(get_duration, source_path)
+        if duration > MAX_DURATION_SECONDS:
+            shutil.rmtree(job_dir, ignore_errors=True)
+            raise HTTPException(
+                413,
+                f"Media duration {duration:.0f}s exceeds {MAX_DURATION_SECONDS // 60} min limit",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # If ffprobe fails here, let the pipeline handle it
 
     # Derive title from original filename
     original_title = Path(file.filename).stem
@@ -106,22 +154,46 @@ async def upload_file(file: UploadFile) -> dict:
 async def _run_pipeline(job_id: str, job_dir: Path, source_path: Path, title: str | None = None) -> None:
     """Run the pipeline in background, updating job status."""
     async with _pipeline_lock:
+        timings: list[StageTiming] = []
+
         def on_status(status: str, message: str) -> None:
+            now = time.monotonic()
+            # Close previous stage timing
+            if timings and timings[-1].end is None:
+                timings[-1].end = now
+                timings[-1].duration_s = round(now - timings[-1].start, 2)
+            # Open new stage timing
+            timings.append(StageTiming(stage=status, start=now))
             jobs[job_id] = JobStatus(
                 jobId=job_id,
                 status=JobStatusEnum(status),
                 message=message,
+                timings=timings,
             )
 
         try:
             await asyncio.to_thread(run_pipeline, job_dir, source_path, on_status, title)
-            jobs[job_id] = JobStatus(jobId=job_id, status=JobStatusEnum.ready)
+            # Close final stage timing
+            now = time.monotonic()
+            if timings and timings[-1].end is None:
+                timings[-1].end = now
+                timings[-1].duration_s = round(now - timings[-1].start, 2)
+            jobs[job_id] = JobStatus(
+                jobId=job_id,
+                status=JobStatusEnum.ready,
+                timings=timings,
+            )
         except Exception as e:
             logger.exception("Pipeline failed for job %s", job_id)
+            now = time.monotonic()
+            if timings and timings[-1].end is None:
+                timings[-1].end = now
+                timings[-1].duration_s = round(now - timings[-1].start, 2)
             jobs[job_id] = JobStatus(
                 jobId=job_id,
                 status=JobStatusEnum.failed,
                 error=str(e),
+                timings=timings,
             )
 
 
@@ -171,6 +243,7 @@ async def serve_track_file(job_id: str, path: str) -> FileResponse:
     media_types = {
         ".mp4": "video/mp4",
         ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
         ".json": "application/json",
     }
     media_type = media_types.get(suffix, "application/octet-stream")

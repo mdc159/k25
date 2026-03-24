@@ -57,11 +57,13 @@ def check_dependencies() -> list[str]:
 
     # Check demucs via python -m demucs --help
     try:
-        subprocess.run(
+        result = subprocess.run(
             [PYTHON, "-m", "demucs", "--help"],
             capture_output=True,
             timeout=10,
         )
+        if result.returncode != 0:
+            missing.append("demucs")
     except Exception:
         missing.append("demucs")
 
@@ -164,6 +166,22 @@ def copy_stems(stem_wavs: dict[str, Path], stems_dir: Path) -> dict[str, Path]:
     return final
 
 
+def compress_stems(stem_wavs: dict[str, Path], stems_dir: Path) -> dict[str, Path]:
+    """Compress WAV stems to AAC .m4a at 256kbps for browser playback."""
+    compressed = {}
+    for stem, wav_path in stem_wavs.items():
+        m4a_path = stems_dir / f"{stem}.m4a"
+        _run([
+            "ffmpeg", "-y",
+            "-i", str(wav_path),
+            "-c:a", "aac", "-b:a", "256k",
+            "-movflags", "+faststart",
+            str(m4a_path),
+        ], timeout=300)
+        compressed[stem] = m4a_path
+    return compressed
+
+
 def write_manifest(
     stems_dir: Path,
     stem_wavs: dict[str, Path],
@@ -173,10 +191,13 @@ def write_manifest(
     """Write stems.json manifest matching StemsManifest type."""
     stems = []
     for stem in STEM_ORDER:
+        # Use compressed .m4a if available, otherwise fall back to .wav
+        m4a = stems_dir / f"{stem}.m4a"
+        ext = "m4a" if m4a.exists() else "wav"
         stems.append({
             "id": STEM_ID_MAP[stem],
             "name": STEM_DISPLAY_NAMES[stem],
-            "file": f"stems/{stem}.wav",
+            "file": f"stems/{stem}.{ext}",
             "default_gain": 0,
         })
 
@@ -261,15 +282,19 @@ def run_pipeline(
     stems_dir = job_dir / "stems"
     final_stems = copy_stems(stem_wavs, stems_dir)
 
-    # 6. Write manifest
+    # 6. Compress stems for browser playback (WAV → AAC .m4a)
+    on_status("encoding", "Compressing stems for browser playback")
+    compress_stems(final_stems, stems_dir)
+
+    # 7. Write manifest (auto-detects .m4a if present)
     write_manifest(stems_dir, final_stems, duration, title)
 
-    # 7. Create multi-track MP4
+    # 8. Create multi-track MP4
     on_status("encoding", "Creating multi-track MP4")
     multi_track = job_dir / "multi-track.mp4"
     create_multi_track_mp4(video_path, final_stems, multi_track)
 
-    # 8. Cleanup temp files
+    # 9. Cleanup temp files
     audio_path.unlink(missing_ok=True)
     shutil.rmtree(demucs_out, ignore_errors=True)
 
