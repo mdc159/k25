@@ -116,7 +116,7 @@ export const LibraryDrawer: React.FC = () => {
               <div>
                 <p className="text-zinc-400">No tracks yet</p>
                 <p className="text-sm text-zinc-600 mt-1">
-                  Add a YouTube URL to get started
+                  Upload a video file to get started
                 </p>
               </div>
               <Button onClick={handleAddSource} className="mt-2">
